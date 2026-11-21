@@ -409,4 +409,125 @@ function flightTick() {
 
   // Greitis pirmyn / atgal (sklandžiai)
   if (k('fwd') && !k('back'))      d.speed = approach(d.speed, maxV, ACCEL * dt);
-  else if (k('back') && !k('fwd')) d.speed = approach(d.speed, -backV,
+  else if (k('back') && !k('fwd')) d.speed = approach(d.speed, -backV, (d.speed > 0 ? BRAKE : ACCEL) * dt);
+  else                             d.speed = approach(d.speed, 0, COAST * dt);
+
+  // Sukimasis
+  const turnMax = rad(TURN_DPS);
+  const turnDir = (k('right') ? 1 : 0) - (k('left') ? 1 : 0);
+  d.turn = approach(d.turn, turnDir * turnMax, rad(TURN_ACC) * dt);
+  d.heading = Cesium.Math.zeroToTwoPi(d.heading + d.turn * dt);
+
+  // Aukštis: be klavišų laikomas pastovus (virš jūros lygio), kaip tikro drono
+  const climbDir = (k('up') ? 1 : 0) - (k('down') ? 1 : 0);
+  d.climb = approach(d.climb, climbDir * CLIMB_MS, CLIMB_ACC * dt);
+  d.h += d.climb * dt;
+
+  // Kameros pakreipimas
+  const tiltDir = (k('camUp') ? 1 : 0) - (k('camDown') ? 1 : 0);
+  d.pitch = Cesium.Math.clamp(d.pitch + tiltDir * rad(TILT_DPS) * dt, rad(TILT_MIN), rad(TILT_MAX));
+
+  // Judėjimas: heading 0 = šiaurė, 90° = rytai
+  const dist = d.speed * dt;
+  d.lat += dist * Math.cos(d.heading) / EARTH_R;
+  d.lon += dist * Math.sin(d.heading) / (EARTH_R * Math.cos(d.lat));
+
+  // Neleidžia nusileisti žemiau MIN_AGL (užlėkus ant pastato / medžio – iššoka viršun)
+  if (groundH !== null && d.h < groundH + MIN_AGL) {
+    d.h = groundH + MIN_AGL;
+    if (d.climb < 0) d.climb = 0;
+  }
+
+  // Pasvirimas posūkyje – tik kai skrenda (vietoje sukantis nesvyra)
+  const roll = rad(BANK_DEG) * (d.turn / turnMax) * Math.min(1, Math.abs(d.speed) / maxV);
+
+  viewer.camera.setView({
+    destination: Cesium.Cartesian3.fromRadians(d.lon, d.lat, d.h),
+    orientation: { heading: d.heading, pitch: d.pitch, roll },
+  });
+
+  if (now - lastOsdT > 100) { lastOsdT = now; updateOsd(); }
+}
+
+// Žemės aukštis po dronu: greitas būdas, o jei nepavyksta – detalus (asinchroninis)
+function sampleGround() {
+  if (!flying || !viewer || !viewer.scene.sampleHeightSupported) return;
+  const pos = new Cesium.Cartographic(drone.lon, drone.lat);
+  let h;
+  try { h = viewer.scene.sampleHeight(pos); } catch (e) { h = undefined; }
+  if (Cesium.defined(h)) { groundH = h; return; }
+
+  if (groundBusy) return;
+  groundBusy = true;
+  const id = ++groundReq;
+  const release = () => { if (id === groundReq) groundBusy = false; };
+  setTimeout(release, 3000);                 // jei užstrigo – leisti naują užklausą
+  viewer.scene.sampleHeightMostDetailed([pos])
+    .then((res) => {
+      if (id === groundReq && res && res[0] && Cesium.defined(res[0].height)) groundH = res[0].height;
+    })
+    .catch(() => {})
+    .finally(release);
+}
+setInterval(sampleGround, 200);
+
+function updateOsd() {
+  $('osdSpeed').textContent = `${Math.round(drone.speed * 3.6)} km/h`;
+  $('osdCam').textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(drone.pitch))}°`;
+  const alt = $('osdAlt');
+  if (groundH === null) { alt.textContent = 'Aukštis ? m'; alt.classList.remove('low'); return; }
+  const agl = Math.round(drone.h - groundH);
+  alt.textContent = `Aukštis ${agl} m`;
+  alt.classList.toggle('low', agl < LOW_AGL);
+}
+
+function updateHud(start, target) {
+  $('hud').innerHTML =
+    `Startas: ${start.mgrs}<br>` +
+    `Taikinys: ${target ? target.mgrs : '—'}`;
+  show('hud');
+}
+
+// ===== Klaviatūra =====
+window.addEventListener('keydown', (e) => {
+  const act = KEYMAP[e.code];
+  if (!act || !flying || e.ctrlKey || e.metaKey || e.altKey) return;
+  e.preventDefault();
+  pressed.add(act);
+});
+window.addEventListener('keyup', (e) => {
+  const act = KEYMAP[e.code];
+  if (act) pressed.delete(act);
+});
+window.addEventListener('blur', () => pressed.clear());   // perjungus langą klavišai „neužstringa“
+
+// ===== Mygtukai =====
+$('tokenSave').addEventListener('click', saveToken);
+$('tokenInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveToken(); });
+$('tokenCancel').addEventListener('click', () => {
+  hide('tokenOverlay');
+  if (!viewer) openMission(false); else resumeFlight();
+});
+
+$('missionGo').addEventListener('click', startMission);
+$('startInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
+$('targetInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
+$('missionCancel').addEventListener('click', () => { hide('missionOverlay'); resumeFlight(); });
+
+$('btnMission').addEventListener('click', () => openMission(true));
+$('btnToken').addEventListener('click', openToken);
+
+liveHint('startInput', 'startHint');
+liveHint('targetInput', 'targetHint');
+
+// ===== Pradžia =====
+if (typeof Cesium === 'undefined' || typeof mgrs === 'undefined') {
+  setStatus('Nepavyko įkelti bibliotekų. Patikrink internetą ir perkrauk puslapį.');
+} else if (!token) {
+  openToken();
+} else {
+  openMission(false);
+}
+</script>
+</body>
+</html>
