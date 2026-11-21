@@ -6,6 +6,7 @@
 <title>FPV Navigatoriaus ir piloto treniruoklis</title>
 <!-- 1 žingsnis: token'o ekranas, misijos įvedimas, 3D vietovė -->
 <!-- 2 žingsnis: skrydis klaviatūra (8/2/4/6, W/S, Q/A), greitis ir aukštis ekrane, pagalbos eilutė -->
+<!-- 2b: tolygesnis vaizdo krovimas skrendant, pagalbos eilutė per vieną eilutę -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -46,7 +47,7 @@
     background: rgba(0,0,0,0.7); color: #fff; padding: 14px 22px; border-radius: 8px; font-size: 18px; }
 
   /* FPV OSD: greitis, kamera, aukštis */
-  #osd { position: absolute; left: 0; right: 0; bottom: 84px; z-index: 10; display: flex;
+  #osd { position: absolute; left: 0; right: 0; bottom: 100px; z-index: 10; display: flex;
     justify-content: space-between; align-items: flex-end; padding: 0 28px; pointer-events: none;
     color: #fff; font: 700 26px/1.2 ui-monospace, Consolas, "Courier New", monospace;
     text-shadow: 0 0 3px #000, 0 0 6px #000, 1px 1px 2px #000; }
@@ -54,7 +55,7 @@
   #osd .low { color: #ff5a5a; }
 
   /* Pagalbos eilutė (virš Cesium/Google autorių teisių eilutės, kad jos neuždengtų) */
-  #helpBar { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); z-index: 10;
+  #helpBar { position: absolute; left: 0; right: 0; margin: 0 auto; width: fit-content; bottom: 34px; z-index: 10;
     background: rgba(0,0,0,0.6); color: #ddd; font-size: 15px; max-width: 94vw; box-sizing: border-box;
     text-align: center; line-height: 1.7; padding: 5px 14px; border-radius: 6px; pointer-events: none; }
   #helpBar b { color: #fff; background: #333; border: 1px solid #666; border-radius: 4px;
@@ -133,7 +134,7 @@ const KEY_START  = 'fpvsim_start';
 const KEY_TARGET = 'fpvsim_target';
 
 // Skrydis (2 žingsnis). Šiuos skaičius galima keisti pagal pojūtį.
-const FOV_DEG    = 100;   // kameros matymo kampas horizontaliai, °
+const FOV_DEG    = 90;    // kameros matymo kampas horizontaliai, ° (platesnis = daugiau krauti)
 const MAX_KMH    = 80;    // didžiausias greitis pirmyn, km/h
 const BACK_KMH   = 15;    // didžiausias greitis atgal, km/h
 const ACCEL      = 7;     // įsibėgėjimas, m/s²
@@ -316,7 +317,16 @@ async function initViewer() {
 
   setStatus('Jungiamasi prie Cesium ion...');
   try {
-    const tileset = await Cesium.createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: true });
+    // Daugiau vaizdo gabalų vienu metu (Google serveris tai leidžia)
+    Cesium.RequestScheduler.maximumRequests = 64;
+    Cesium.RequestScheduler.maximumRequestsPerServer = 36;
+    const tileset = await Cesium.createGooglePhotorealistic3DTileset(
+      { onlyUsingWithGoogleGeocoder: true },
+      {
+        foveatedScreenSpaceError: false,   // krauti visą ekraną vienodai, ne tik centrą
+        cullRequestsWhileMoving: false,    // judant nenumesti užklausų – dronas juda visada
+        loadSiblings: true,                // krauti ir gretimus gabalus, kad posūkyje vaizdas būtų paruoštas
+      });
     viewer.scene.primitives.add(tileset);
     viewer.clock.onTick.addEventListener(flightTick);              // skrydis – kiekviename kadre
     setStatus('');
