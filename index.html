@@ -7,6 +7,7 @@
 <!-- 1 žingsnis: token'o ekranas, misijos įvedimas, 3D vietovė -->
 <!-- 2 žingsnis: skrydis klaviatūra (8/2/4/6, W/S, Q/A), greitis ir aukštis ekrane, pagalbos eilutė -->
 <!-- 2b: tolygesnis vaizdo krovimas skrendant, pagalbos eilutė per vieną eilutę -->
+<!-- 2c: žemės aukštis iš Cesium World Terrain (netrukdo vaizdui krautis), krovimo indikatorius, R – atnaujinti vaizdą -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -41,6 +42,8 @@
   #hud { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.55);
     color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 15px; line-height: 1.5;
     pointer-events: none; }
+  #hudTiles { color: #aaa; font-size: 13px; }
+  #hudTiles.warn { color: #ffb347; }
   #topButtons { position: absolute; top: 10px; right: 10px; z-index: 10; display: flex; gap: 8px; }
   #topButtons button { font-size: 14px; padding: 7px 12px; background: rgba(40,40,40,0.8); }
   #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
@@ -83,7 +86,8 @@
   <span class="k"><b>8</b> / <b>2</b> pirmyn / atgal</span><span class="sep">·</span>
   <span class="k"><b>4</b> / <b>6</b> sukti kairėn / dešinėn</span><span class="sep">·</span>
   <span class="k"><b>W</b> / <b>S</b> aukštyn / žemyn</span><span class="sep">·</span>
-  <span class="k"><b>Q</b> / <b>A</b> kamera žemyn / aukštyn</span>
+  <span class="k"><b>Q</b> / <b>A</b> kamera žemyn / aukštyn</span><span class="sep">·</span>
+  <span class="k"><b>R</b> atnaujinti vaizdą</span>
 </div>
 
 <!-- Token'o ekranas -->
@@ -151,6 +155,7 @@ const TILT_START = -10;   // kameros kampas starte, °
 const BANK_DEG   = 12;    // pasvirimas posūkyje, ° (0 = be pasvirimo)
 const MIN_AGL    = 2;     // žemiau nenusileidžia, m
 const LOW_AGL    = 10;    // žemiau šito aukštis rodomas raudonai, m
+const GROUND_MS  = 500;   // kas kiek ms matuoti žemės aukštį po dronu
 const EARTH_R    = 6378137;
 
 // Klavišai: e.code (fizinis klavišas), todėl veikia ir su lietuviška klaviatūra
@@ -233,9 +238,11 @@ let token = load(KEY_TOKEN);
 const drone = { lon: 0, lat: 0, h: 0, heading: 0, pitch: 0, speed: 0, turn: 0, climb: 0 };
 let droneReady = false;     // ar jau buvo startuota
 let flying = false;         // ar dabar skrendama (ne atidarytas langas)
-let groundH = null;         // žemės aukštis po dronu
-let groundBusy = false, groundReq = 0;
-let lastT = 0, lastOsdT = 0;
+let groundH = null;         // žemės aukštis po dronu (be medžių ir namų)
+let groundBusy = false, groundTok = 0, flightId = 0;
+let tileset = null;         // Google 3D vaizdas
+let terrain = null;         // Cesium World Terrain – tik aukščiui matuoti, nerodomas
+let lastT = 0, lastOsdT = 0, lastAutoFix = 0;
 const pressed = new Set();
 
 // ===== Token'o ekranas =====
@@ -320,14 +327,21 @@ async function initViewer() {
     // Daugiau vaizdo gabalų vienu metu (Google serveris tai leidžia)
     Cesium.RequestScheduler.maximumRequests = 64;
     Cesium.RequestScheduler.maximumRequestsPerServer = 36;
-    const tileset = await Cesium.createGooglePhotorealistic3DTileset(
+    tileset = await Cesium.createGooglePhotorealistic3DTileset(
       { onlyUsingWithGoogleGeocoder: true },
       {
         foveatedScreenSpaceError: false,   // krauti visą ekraną vienodai, ne tik centrą
         cullRequestsWhileMoving: false,    // judant nenumesti užklausų – dronas juda visada
-        loadSiblings: true,                // krauti ir gretimus gabalus, kad posūkyje vaizdas būtų paruoštas
       });
     viewer.scene.primitives.add(tileset);
+
+    // Žemės aukštį matuojam iš atskiro reljefo, kad netrukdytų Google vaizdui krautis
+    try {
+      terrain = await Cesium.createWorldTerrainAsync();
+    } catch (e) {
+      terrain = null;
+      console.warn('Cesium World Terrain įkelti nepavyko – aukštis bus skaičiuojamas nuo starto.', e);
+    }
     viewer.clock.onTick.addEventListener(flightTick);              // skrydis – kiekviename kadre
     setStatus('');
     show('topButtons');
@@ -358,8 +372,8 @@ async function flyToStart(start) {
   });
 
   setStatus('Ieškomas žemės aukštis...');
-  let ground = null;
-  if (scene.sampleHeightSupported) {
+  let ground = await terrainHeight(Cesium.Math.toRadians(start.lon), Cesium.Math.toRadians(start.lat), 15000);
+  if (ground === null && scene.sampleHeightSupported) {   // atsarginis būdas, jei reljefo nėra
     try {
       const probe = [Cesium.Cartographic.fromDegrees(start.lon, start.lat)];
       const timeout = new Promise((res) => setTimeout(() => res(null), 20000));
@@ -384,7 +398,7 @@ async function flyToStart(start) {
     speed: 0, turn: 0, climb: 0,
   });
   groundH = ground;
-  groundReq++; groundBusy = false;          // pamiršti senas užklausas
+  flightId++; groundBusy = false;           // pamiršti senas užklausas
   droneReady = true;
   resumeFlight();
 }
@@ -442,7 +456,7 @@ function flightTick() {
   d.lat += dist * Math.cos(d.heading) / EARTH_R;
   d.lon += dist * Math.sin(d.heading) / (EARTH_R * Math.cos(d.lat));
 
-  // Neleidžia nusileisti žemiau MIN_AGL (užlėkus ant pastato / medžio – iššoka viršun)
+  // Neleidžia nusileisti žemiau MIN_AGL virš žemės (medžiai ir namai neskaičiuojami)
   if (groundH !== null && d.h < groundH + MIN_AGL) {
     d.h = groundH + MIN_AGL;
     if (d.climb < 0) d.climb = 0;
@@ -459,47 +473,90 @@ function flightTick() {
   if (now - lastOsdT > 100) { lastOsdT = now; updateOsd(); }
 }
 
-// Žemės aukštis po dronu: greitas būdas, o jei nepavyksta – detalus (asinchroninis)
-function sampleGround() {
-  if (!flying || !viewer || !viewer.scene.sampleHeightSupported) return;
-  const pos = new Cesium.Cartographic(drone.lon, drone.lat);
-  let h;
-  try { h = viewer.scene.sampleHeight(pos); } catch (e) { h = undefined; }
-  if (Cesium.defined(h)) { groundH = h; return; }
-
-  if (groundBusy) return;
-  groundBusy = true;
-  const id = ++groundReq;
-  const release = () => { if (id === groundReq) groundBusy = false; };
-  setTimeout(release, 3000);                 // jei užstrigo – leisti naują užklausą
-  viewer.scene.sampleHeightMostDetailed([pos])
-    .then((res) => {
-      if (id === groundReq && res && res[0] && Cesium.defined(res[0].height)) groundH = res[0].height;
-    })
-    .catch(() => {})
-    .finally(release);
+// Žemės aukštis iš Cesium World Terrain (be medžių ir namų). Grąžina metrus arba null.
+async function terrainHeight(lon, lat, timeoutMs) {
+  if (!terrain) return null;
+  try {
+    const probe = [new Cesium.Cartographic(lon, lat)];
+    const timeout = new Promise((res) => setTimeout(() => res(null), timeoutMs));
+    const res = await Promise.race([Cesium.sampleTerrainMostDetailed(terrain, probe), timeout]);
+    const h = res && res[0] ? res[0].height : undefined;
+    return Number.isFinite(h) ? h : null;
+  } catch (e) {
+    return null;
+  }
 }
-setInterval(sampleGround, 200);
+
+// Skrendant aukštis po dronu matuojamas kas GROUND_MS, vienu metu – tik viena užklausa
+function sampleGround() {
+  if (!flying || !terrain || groundBusy) return;
+  groundBusy = true;
+  const tok = ++groundTok, fid = flightId;
+  setTimeout(() => { if (tok === groundTok) groundBusy = false; }, 5000);   // jei užstrigo
+  terrainHeight(drone.lon, drone.lat, 5000).then((h) => {
+    if (fid === flightId && h !== null) groundH = h;
+    if (tok === groundTok) groundBusy = false;
+  });
+}
+setInterval(sampleGround, GROUND_MS);
 
 function updateOsd() {
   $('osdSpeed').textContent = `${Math.round(drone.speed * 3.6)} km/h`;
   $('osdCam').textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(drone.pitch))}°`;
   const alt = $('osdAlt');
-  if (groundH === null) { alt.textContent = 'Aukštis ? m'; alt.classList.remove('low'); return; }
+  if (groundH === null) { alt.textContent = 'Aukštis ? m'; alt.classList.remove('low'); updateTilesInfo(); return; }
   const agl = Math.round(drone.h - groundH);
   alt.textContent = `Aukštis ${agl} m`;
   alt.classList.toggle('low', agl < LOW_AGL);
+  updateTilesInfo();
+}
+
+// Krovimo indikatorius: kiek vaizdo gabalų dar kraunasi ir kiek užima atminties
+function updateTilesInfo() {
+  const el = $('hudTiles');
+  if (!el || !tileset) return;
+  const st = tileset.statistics;
+  const n = st.numberOfPendingRequests + st.numberOfTilesProcessing;
+  const mb = Math.round(tileset.totalMemoryUsageInBytes / 1e6);
+  const full = tileset.memoryAdjustedScreenSpaceError > tileset.maximumScreenSpaceError + 0.01;
+  el.textContent = (n > 0 ? `Vaizdas kraunasi: ${n}` : 'Vaizdas užkrautas') + ` · ${mb} MB`
+                 + (full ? ' · ATMINTIS PILNA' : '') + (terrain ? '' : ' · be reljefo');
+  el.classList.toggle('warn', full);
+
+  // Automatiškai: jei atmintis perpildyta, išmesti nereikalingus gabalus (kitaip Cesium nustoja rodyti naujus)
+  const now = performance.now();
+  if (now - lastAutoFix > 3000) {
+    const used = tileset.totalMemoryUsageInBytes;
+    if (used > tileset.cacheBytes) { tileset.trimLoadedTiles(); lastAutoFix = now; }
+    else if (full) { tileset.maximumScreenSpaceError = tileset.maximumScreenSpaceError; lastAutoFix = now; }
+  }
+}
+
+// R: atnaujinti vaizdą – išmesti nereikalingus gabalus iš atminties ir grąžinti pilną detalumą
+function refreshTiles() {
+  if (!tileset) return;
+  tileset.trimLoadedTiles();
+  tileset.maximumScreenSpaceError = tileset.maximumScreenSpaceError;   // atstato detalumą, jei buvo sumažintas
+  lastAutoFix = performance.now();
+  setStatus('Vaizdas atnaujinamas...');
+  setTimeout(() => { if ($('status').textContent === 'Vaizdas atnaujinamas...') setStatus(''); }, 1200);
 }
 
 function updateHud(start, target) {
   $('hud').innerHTML =
     `Startas: ${start.mgrs}<br>` +
-    `Taikinys: ${target ? target.mgrs : '—'}`;
+    `Taikinys: ${target ? target.mgrs : '—'}<br>` +
+    `<span id="hudTiles"></span>`;
   show('hud');
 }
 
 // ===== Klaviatūra =====
 window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyR' && flying && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    refreshTiles();
+    return;
+  }
   const act = KEYMAP[e.code];
   if (!act || !flying || e.ctrlKey || e.metaKey || e.altKey) return;
   e.preventDefault();
