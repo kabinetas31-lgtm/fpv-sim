@@ -9,6 +9,7 @@
 <!-- 2b: tolygesnis vaizdo krovimas skrendant, pagalbos eilutė per vieną eilutę -->
 <!-- 2c: žemės aukštis iš Cesium World Terrain (netrukdo vaizdui krautis), krovimo indikatorius, R – atnaujinti vaizdą -->
 <!-- 2d: +/− detalumo reguliatorius (mažiau gabalų = nebelieka neryškių dėmių), didesnė užklausų eilė -->
+<!-- 2e: L – krovimo režimas A/B (B = Cesium skipLevelOfDetail; bandymas apeiti Cesium klaidą #12683), detalumo lygis 8 -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -89,6 +90,7 @@
   <span class="k"><b>W</b> / <b>S</b> aukštyn / žemyn</span><span class="sep">·</span>
   <span class="k"><b>Q</b> / <b>A</b> kamera žemyn / aukštyn</span><span class="sep">·</span>
   <span class="k"><b>R</b> atnaujinti vaizdą</span><span class="sep">·</span>
+  <span class="k"><b>L</b> režimas A/B</span><span class="sep">·</span>
   <span class="k"><b>+</b> / <b>−</b> detalumas</span>
 </div>
 
@@ -159,10 +161,11 @@ const MIN_AGL    = 2;     // žemiau nenusileidžia, m
 const LOW_AGL    = 10;    // žemiau šito aukštis rodomas raudonai, m
 const GROUND_MS  = 500;   // kas kiek ms matuoti žemės aukštį po dronu
 
-// Detalumas: lygiai 1..7 (Cesium maximumScreenSpaceError). Mažesnis lygis = mažiau gabalų, greičiau kraunasi.
-const DETAIL_SSE     = [64, 48, 32, 24, 16, 12, 8];
+// Detalumas: lygiai 1..8 (Cesium maximumScreenSpaceError). Mažesnis lygis = mažiau gabalų, greičiau kraunasi.
+const DETAIL_SSE     = [64, 48, 32, 24, 16, 12, 8, 4];
 const DETAIL_DEFAULT = 4;
 const KEY_DETAIL     = 'fpvsim_detail';
+const KEY_MODE       = 'fpvsim_mode';     // krovimo režimas: A = įprastas, B = skipLevelOfDetail
 const EARTH_R    = 6378137;
 
 // Klavišai: e.code (fizinis klavišas), todėl veikia ir su lietuviška klaviatūra
@@ -251,6 +254,7 @@ let tileset = null;         // Google 3D vaizdas
 let terrain = null;         // Cesium World Terrain – tik aukščiui matuoti, nerodomas
 let lastT = 0, lastOsdT = 0;
 let detail = Math.min(DETAIL_SSE.length, Math.max(1, parseInt(load(KEY_DETAIL), 10) || DETAIL_DEFAULT));
+let lodMode = load(KEY_MODE) === 'B' ? 'B' : 'A';
 const pressed = new Set();
 
 // ===== Token'o ekranas =====
@@ -342,6 +346,7 @@ async function initViewer() {
         foveatedScreenSpaceError: false,   // krauti visą ekraną vienodai, ne tik centrą
         cullRequestsWhileMoving: false,    // judant nenumesti užklausų – dronas juda visada
         maximumScreenSpaceError: DETAIL_SSE[detail - 1],
+        skipLevelOfDetail: lodMode === 'B',
       });
     viewer.scene.primitives.add(tileset);
 
@@ -529,7 +534,7 @@ function updateTilesInfo() {
   const n = st.numberOfPendingRequests + st.numberOfTilesProcessing;
   const mb = Math.round(tileset.totalMemoryUsageInBytes / 1e6);
   const full = tileset.memoryAdjustedScreenSpaceError > tileset.maximumScreenSpaceError + 0.01;
-  el.textContent = `Detalumas ${detail}/${DETAIL_SSE.length} · `
+  el.textContent = `Režimas ${lodMode} · Detalumas ${detail}/${DETAIL_SSE.length} · `
                  + (n > 0 ? `kraunasi: ${n}` : 'užkrauta') + ` · ${mb} MB`
                  + (full ? ' · ATMINTIS PILNA' : '') + (terrain ? '' : ' · be reljefo');
   el.classList.toggle('warn', full);
@@ -542,6 +547,18 @@ function setDetail(level) {
   if (tileset) tileset.maximumScreenSpaceError = DETAIL_SSE[detail - 1];
   updateTilesInfo();
   flashStatus(`Detalumas ${detail}/${DETAIL_SSE.length}`);
+}
+
+// L: perjungti krovimo režimą A/B. Pasirinkimas išsaugomas naršyklėje.
+function toggleMode() {
+  lodMode = lodMode === 'A' ? 'B' : 'A';
+  save(KEY_MODE, lodMode);
+  if (tileset) {
+    tileset.skipLevelOfDetail = lodMode === 'B';
+    tileset.trimLoadedTiles();
+  }
+  updateTilesInfo();
+  flashStatus(`Krovimo režimas ${lodMode}`);
 }
 
 function flashStatus(text) {
@@ -569,6 +586,7 @@ function updateHud(start, target) {
 window.addEventListener('keydown', (e) => {
   if (flying && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.code === 'KeyR') { e.preventDefault(); refreshTiles(); return; }
+    if (e.code === 'KeyL') { e.preventDefault(); toggleMode(); return; }
     if (e.code === 'NumpadAdd' || e.code === 'Equal')       { e.preventDefault(); setDetail(detail + 1); return; }
     if (e.code === 'NumpadSubtract' || e.code === 'Minus')  { e.preventDefault(); setDetail(detail - 1); return; }
   }
