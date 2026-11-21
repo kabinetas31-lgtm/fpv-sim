@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FPV Navigatoriaus ir piloto treniruoklis</title>
 <!-- 1 žingsnis: token'o ekranas, misijos įvedimas, 3D vietovė -->
+<!-- 2 žingsnis: skrydis klaviatūra (8/2/4/6, W/S, Q/A), greitis ir aukštis ekrane, pagalbos eilutė -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -43,6 +44,23 @@
   #topButtons button { font-size: 14px; padding: 7px 12px; background: rgba(40,40,40,0.8); }
   #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
     background: rgba(0,0,0,0.7); color: #fff; padding: 14px 22px; border-radius: 8px; font-size: 18px; }
+
+  /* FPV OSD: greitis, kamera, aukštis */
+  #osd { position: absolute; left: 0; right: 0; bottom: 84px; z-index: 10; display: flex;
+    justify-content: space-between; align-items: flex-end; padding: 0 28px; pointer-events: none;
+    color: #fff; font: 700 26px/1.2 ui-monospace, Consolas, "Courier New", monospace;
+    text-shadow: 0 0 3px #000, 0 0 6px #000, 1px 1px 2px #000; }
+  #osd .mid { font-size: 18px; opacity: 0.85; }
+  #osd .low { color: #ff5a5a; }
+
+  /* Pagalbos eilutė (virš Cesium/Google autorių teisių eilutės, kad jos neuždengtų) */
+  #helpBar { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); z-index: 10;
+    background: rgba(0,0,0,0.6); color: #ddd; font-size: 15px; max-width: 94vw; box-sizing: border-box;
+    text-align: center; line-height: 1.7; padding: 5px 14px; border-radius: 6px; pointer-events: none; }
+  #helpBar b { color: #fff; background: #333; border: 1px solid #666; border-radius: 4px;
+    padding: 0 6px; font-weight: 700; }
+  #helpBar .sep { color: #777; margin: 0 8px; }
+  #helpBar span.k { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -54,6 +72,18 @@
   <button id="btnToken">Token</button>
 </div>
 <div id="status" class="hidden"></div>
+
+<div id="osd" class="hidden">
+  <span id="osdSpeed">0 km/h</span>
+  <span id="osdCam" class="mid">Kamera 0°</span>
+  <span id="osdAlt">Aukštis ? m</span>
+</div>
+<div id="helpBar" class="hidden">
+  <span class="k"><b>8</b> / <b>2</b> pirmyn / atgal</span><span class="sep">·</span>
+  <span class="k"><b>4</b> / <b>6</b> sukti kairėn / dešinėn</span><span class="sep">·</span>
+  <span class="k"><b>W</b> / <b>S</b> aukštyn / žemyn</span><span class="sep">·</span>
+  <span class="k"><b>Q</b> / <b>A</b> kamera žemyn / aukštyn</span>
+</div>
 
 <!-- Token'o ekranas -->
 <div id="tokenOverlay" class="overlay hidden">
@@ -97,10 +127,40 @@
 
 <script>
 // ===== Nustatymai =====
-const HEIGHT_AGL = 50;               // kameros aukštis virš žemės starte, m
+const HEIGHT_AGL = 50;               // starto aukštis virš žemės, m
 const KEY_TOKEN  = 'fpvsim_token';
 const KEY_START  = 'fpvsim_start';
 const KEY_TARGET = 'fpvsim_target';
+
+// Skrydis (2 žingsnis). Šiuos skaičius galima keisti pagal pojūtį.
+const FOV_DEG    = 100;   // kameros matymo kampas horizontaliai, °
+const MAX_KMH    = 80;    // didžiausias greitis pirmyn, km/h
+const BACK_KMH   = 15;    // didžiausias greitis atgal, km/h
+const ACCEL      = 7;     // įsibėgėjimas, m/s²
+const BRAKE      = 12;    // stabdymas spaudžiant 2, kai skrendama pirmyn, m/s²
+const COAST      = 5;     // lėtėjimas atleidus 8/2, m/s²
+const TURN_DPS   = 60;    // sukimosi greitis, °/s
+const TURN_ACC   = 240;   // kaip greitai įsisuka / nustoja suktis, °/s²
+const CLIMB_MS   = 6;     // kilimo / leidimosi greitis, m/s
+const CLIMB_ACC  = 10;    // m/s²
+const TILT_DPS   = 45;    // kameros pakreipimo greitis, °/s
+const TILT_MIN   = -85;   // kamera žemyn iki, °
+const TILT_MAX   = 20;    // kamera aukštyn iki, °
+const TILT_START = -10;   // kameros kampas starte, °
+const BANK_DEG   = 12;    // pasvirimas posūkyje, ° (0 = be pasvirimo)
+const MIN_AGL    = 2;     // žemiau nenusileidžia, m
+const LOW_AGL    = 10;    // žemiau šito aukštis rodomas raudonai, m
+const EARTH_R    = 6378137;
+
+// Klavišai: e.code (fizinis klavišas), todėl veikia ir su lietuviška klaviatūra
+const KEYMAP = {
+  Numpad8: 'fwd',   Digit8: 'fwd',
+  Numpad2: 'back',  Digit2: 'back',
+  Numpad4: 'left',  Digit4: 'left',
+  Numpad6: 'right', Digit6: 'right',
+  KeyW: 'up',       KeyS: 'down',
+  KeyQ: 'camDown',  KeyA: 'camUp',
+};
 
 // ===== Pagalbinės funkcijos =====
 const $ = (id) => document.getElementById(id);
@@ -112,6 +172,11 @@ function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
 
 function setStatus(text) {
   if (text) { $('status').textContent = text; show('status'); } else { hide('status'); }
+}
+
+const rad = (deg) => deg * Math.PI / 180;
+function approach(v, target, step) {
+  return v < target ? Math.min(v + step, target) : Math.max(v - step, target);
 }
 
 // MGRS su tarpais: 35ULA8136376692 -> 35U LA 81363 76692
@@ -163,8 +228,18 @@ function liveHint(inputId, hintId) {
 let viewer = null;
 let token = load(KEY_TOKEN);
 
+// Dronas = nematoma kamera. Kampai radianais, aukštis – virš elipsoido (kaip Cesium).
+const drone = { lon: 0, lat: 0, h: 0, heading: 0, pitch: 0, speed: 0, turn: 0, climb: 0 };
+let droneReady = false;     // ar jau buvo startuota
+let flying = false;         // ar dabar skrendama (ne atidarytas langas)
+let groundH = null;         // žemės aukštis po dronu
+let groundBusy = false, groundReq = 0;
+let lastT = 0, lastOsdT = 0;
+const pressed = new Set();
+
 // ===== Token'o ekranas =====
 function openToken() {
+  pauseFlight();
   $('tokenInput').value = '';
   $('tokenErr').textContent = '';
   if (token) show('tokenCancel'); else hide('tokenCancel');
@@ -185,6 +260,7 @@ function saveToken() {
 
 // ===== Misijos ekranas =====
 function openMission(canCancel) {
+  pauseFlight();
   $('startInput').value  = load(KEY_START);
   $('targetInput').value = load(KEY_TARGET);
   $('startInput').dispatchEvent(new Event('input'));
@@ -235,11 +311,14 @@ async function initViewer() {
     infoBox: false,
     selectionIndicator: false,
   });
+  viewer.scene.screenSpaceCameraController.enableInputs = false;   // pelė kamera nevaldo – tik klaviatūra
+  viewer.camera.frustum.fov = Cesium.Math.toRadians(FOV_DEG);      // platesnis, FPV kameros vaizdas
 
   setStatus('Jungiamasi prie Cesium ion...');
   try {
     const tileset = await Cesium.createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: true });
     viewer.scene.primitives.add(tileset);
+    viewer.clock.onTick.addEventListener(flightTick);              // skrydis – kiekviename kadre
     setStatus('');
     show('topButtons');
     return true;
@@ -285,45 +364,49 @@ async function flyToStart(start) {
     console.warn('Žemės aukščio nepavyko nustatyti, naudojama 180 m.');
   }
 
-  viewer.camera.setView({
-    destination: Cesium.Cartesian3.fromDegrees(start.lon, start.lat, ground + HEIGHT_AGL),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-10), roll: 0 },   // žiūri į šiaurę
+  // Dronas starte: 50 m virš žemės, žiūri į šiaurę, stovi vietoje
+  Object.assign(drone, {
+    lon: Cesium.Math.toRadians(start.lon),
+    lat: Cesium.Math.toRadians(start.lat),
+    h: ground + HEIGHT_AGL,
+    heading: 0,
+    pitch: rad(TILT_START),
+    speed: 0, turn: 0, climb: 0,
   });
+  groundH = ground;
+  groundReq++; groundBusy = false;          // pamiršti senas užklausas
+  droneReady = true;
+  resumeFlight();
 }
 
-function updateHud(start, target) {
-  $('hud').innerHTML =
-    `Startas: ${start.mgrs}<br>` +
-    `Taikinys: ${target ? target.mgrs : '—'}<br>` +
-    `Kamera: ${HEIGHT_AGL} m virš žemės, žiūri į šiaurę<br>` +
-    `<span style="color:#aaa">1 žingsnis: skrydžio dar nėra, pele galima apsidairyti</span>`;
-  show('hud');
+// ===== Skrydis =====
+function pauseFlight() {
+  flying = false;
+  pressed.clear();
+  drone.speed = drone.turn = drone.climb = 0;
 }
 
-// ===== Mygtukai =====
-$('tokenSave').addEventListener('click', saveToken);
-$('tokenInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveToken(); });
-$('tokenCancel').addEventListener('click', () => { hide('tokenOverlay'); if (!viewer) openMission(false); });
-
-$('missionGo').addEventListener('click', startMission);
-$('startInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
-$('targetInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
-$('missionCancel').addEventListener('click', () => hide('missionOverlay'));
-
-$('btnMission').addEventListener('click', () => openMission(true));
-$('btnToken').addEventListener('click', openToken);
-
-liveHint('startInput', 'startHint');
-liveHint('targetInput', 'targetHint');
-
-// ===== Pradžia =====
-if (typeof Cesium === 'undefined' || typeof mgrs === 'undefined') {
-  setStatus('Nepavyko įkelti bibliotekų. Patikrink internetą ir perkrauk puslapį.');
-} else if (!token) {
-  openToken();
-} else {
-  openMission(false);
+function resumeFlight() {
+  if (!droneReady) return;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  pressed.clear();
+  lastT = performance.now();
+  flying = true;
+  show('osd');
+  show('helpBar');
+  updateOsd();
 }
-</script>
-</body>
-</html>
+
+function flightTick() {
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.25);   // jei kortelė buvo paslėpta – be šuolio
+  lastT = now;
+  if (!flying) return;
+
+  const k = (a) => pressed.has(a);
+  const d = drone;
+  const maxV = MAX_KMH / 3.6, backV = BACK_KMH / 3.6;
+
+  // Greitis pirmyn / atgal (sklandžiai)
+  if (k('fwd') && !k('back'))      d.speed = approach(d.speed, maxV, ACCEL * dt);
+  else if (k('back') && !k('fwd')) d.speed = approach(d.speed, -backV,
