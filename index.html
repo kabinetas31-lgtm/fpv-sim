@@ -10,8 +10,9 @@
 <!-- 2c: žemės aukštis iš Cesium World Terrain (netrukdo vaizdui krautis), krovimo indikatorius, R – atnaujinti vaizdą -->
 <!-- 2d: +/− detalumo reguliatorius (mažiau gabalų = nebelieka neryškių dėmių), didesnė užklausų eilė -->
 <!-- 2e: L – krovimo režimas A/B (B = Cesium skipLevelOfDetail; bandymas apeiti Cesium klaidą #12683), detalumo lygis 8 -->
-<!-- IR: N – naktinis IR (NIR) vaizdas: diena → IR su pašvietimu → IR be pašvietimo → diena -->
-<!-- OSD: tipinis FPV (Betaflight stiliaus) OSD; Z / X – vaizdo triukšmas 0–10 -->
+<!-- IR: N – naktinis IR (NIR) vaizdas be pašvietimo: diena ↔ naktis -->
+<!-- OSD: tipinis FPV (Betaflight stiliaus) OSD be LQ ir ANGL; Z / X – vaizdo triukšmas 0–10 -->
+<!-- Misijos: startą ir taikinį galima išsaugoti su pavadinimu ir vėliau pasirinkti iš sąrašo -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -35,6 +36,12 @@
     font-size: 17px; border-radius: 6px; border: 1px solid #555; background: #111; color: #fff; }
   .hint { min-height: 22px; font-size: 15px; color: #9fd49f; margin-top: 4px; }
   .hint.bad { color: #ff8a8a; }
+  .row { display: flex; gap: 8px; margin-top: 6px; align-items: stretch; }
+  .row input, .row select { margin-top: 0; flex: 1; min-width: 0; }
+  .row button { font-size: 15px; padding: 8px 12px; white-space: nowrap; }
+  .panel select { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 17px;
+    border-radius: 6px; border: 1px solid #555; background: #111; color: #fff; }
+  .panel hr { border: none; border-top: 1px solid #3a3f47; margin: 16px 0 4px; }
   .small { font-size: 14px; color: #aaa; margin: 12px 0 0; }
   .err { color: #ff8a8a; min-height: 22px; margin-top: 10px; font-size: 15px; white-space: pre-line; }
   .buttons { margin-top: 14px; display: flex; gap: 10px; }
@@ -97,8 +104,7 @@
 
 <div id="osd" class="hidden">
   <div class="o tl"><span id="oVolt">0.0V</span><br><span id="oMah">0mAh</span></div>
-  <div class="o tc">ANGL</div>
-  <div class="o tr"><span id="oLq">LQ 100</span><br><span id="oTime">00:00</span></div>
+  <div class="o tr"><span id="oTime">00:00</span></div>
   <div id="oHorizon"></div>
   <div id="oCross"></div>
   <div class="o warn blink" id="oWarn"></div>
@@ -142,6 +148,11 @@
 <div id="missionOverlay" class="overlay hidden">
   <div class="panel">
     <h2>Misija</h2>
+    <label for="savedSelect">Išsaugotos misijos</label>
+    <div class="row">
+      <select id="savedSelect"></select>
+      <button id="savedDelete" class="secondary">Ištrinti</button>
+    </div>
     <label for="startInput">Startas</label>
     <input id="startInput" type="text" placeholder="pvz. 35U LA 81363 76692" autocomplete="off" spellcheck="false">
     <div class="hint" id="startHint"></div>
@@ -149,7 +160,14 @@
     <input id="targetInput" type="text" placeholder="MGRS arba platuma, ilguma" autocomplete="off" spellcheck="false">
     <div class="hint" id="targetHint"></div>
     <p class="small">Galima įvesti MGRS arba koordinates iš Google Maps (platuma, ilguma).<br>
-      Taikinys kol kas tik išsaugomas: „TARGET REACHED“ atsiras 3 žingsnyje.</p>
+      Taikinys kol kas tik rodomas: „TARGET REACHED“ atsiras vėliau.</p>
+    <hr>
+    <label for="missionName">Išsaugoti šią misiją kaip</label>
+    <div class="row">
+      <input id="missionName" type="text" placeholder="pvz. Laidagaliai – šiaurė" autocomplete="off">
+      <button id="missionSave" class="secondary">Išsaugoti</button>
+    </div>
+    <div class="hint" id="savedMsg"></div>
     <div class="err" id="missionErr"></div>
     <div class="buttons">
       <button id="missionGo">Pradėti</button>
@@ -211,8 +229,7 @@ const KEY_MODE       = 'fpvsim_mode';     // krovimo režimas: A = įprastas, B 
 //   gain    – bendras šviesumas
 const IR_MODES = [
   null,                                                                                      // 0 = diena
-  { name: 'IR su pašvietimu',  range: 250,  ambient: 0.05, grain: 0.10, veg: 0.6, gain: 1.0  },
-  { name: 'IR be pašvietimo', range: 2500, ambient: 0.30, grain: 0.25, veg: 0.5, gain: 0.55 },
+  { name: 'Naktinis IR',      range: 2500, ambient: 0.30, grain: 0.25, veg: 0.5, gain: 0.55 }, // be pašvietimo
 ];
 const EARTH_R    = 6378137;
 
@@ -307,7 +324,7 @@ let noiseStage = null;
 let detail = Math.min(DETAIL_SSE.length, Math.max(1, parseInt(load(KEY_DETAIL), 10) || DETAIL_DEFAULT));
 let lodMode = load(KEY_MODE) === 'B' ? 'B' : 'A';
 let irStage = null;         // naktinio IR filtras (įjungiamas N)
-let irMode = 0;             // 0 = diena, 1 = IR su pašvietimu, 2 = IR be pašvietimo
+let irMode = 0;             // 0 = diena, 1 = naktinis IR (be pašvietimo)
 const pressed = new Set();
 
 // ===== Token'o ekranas =====
@@ -331,6 +348,87 @@ function saveToken() {
   openMission(false);
 }
 
+// ===== Išsaugotos misijos (tik šioje naršyklėje) =====
+const KEY_MISSIONS = 'fpvsim_missions';
+
+function loadMissions() {
+  try { const a = JSON.parse(load(KEY_MISSIONS) || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function saveMissions(list) {
+  list.sort((a, b) => a.name.localeCompare(b.name, 'lt'));
+  save(KEY_MISSIONS, JSON.stringify(list));
+}
+function fillSavedSelect(selectName) {
+  const sel = $('savedSelect');
+  const list = loadMissions();
+  sel.innerHTML = '';
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = list.length ? '— pasirink —' : '— dar nėra išsaugotų —';
+  sel.appendChild(first);
+  for (const m of list) {
+    const o = document.createElement('option');
+    o.value = m.name;
+    o.textContent = m.name;
+    sel.appendChild(o);
+  }
+  sel.value = selectName || '';
+  resetDeleteButton();
+}
+function setSavedMsg(text, bad) {
+  $('savedMsg').textContent = text;
+  $('savedMsg').classList.toggle('bad', !!bad);
+}
+function pickSaved() {
+  const m = loadMissions().find((x) => x.name === $('savedSelect').value);
+  if (!m) return;
+  $('startInput').value = m.start;
+  $('targetInput').value = m.target || '';
+  $('missionName').value = m.name;
+  $('startInput').dispatchEvent(new Event('input'));
+  $('targetInput').dispatchEvent(new Event('input'));
+  $('missionErr').textContent = '';
+  setSavedMsg('');
+  resetDeleteButton();
+}
+function saveCurrentMission() {
+  const name = $('missionName').value.trim();
+  const startText = $('startInput').value.trim();
+  const targetText = $('targetInput').value.trim();
+  try {
+    if (!parsePoint(startText)) { setSavedMsg('✗ Įvesk startą.', true); return; }
+  } catch (e) { setSavedMsg('✗ Startas: ' + e.message, true); return; }
+  try { parsePoint(targetText); } catch (e) { setSavedMsg('✗ Taikinys: ' + e.message, true); return; }
+  if (!name) { setSavedMsg('✗ Įrašyk pavadinimą.', true); $('missionName').focus(); return; }
+  const list = loadMissions();
+  const i = list.findIndex((x) => x.name === name);
+  const item = { name, start: startText, target: targetText };
+  if (i >= 0) list[i] = item; else list.push(item);
+  saveMissions(list);
+  fillSavedSelect(name);
+  setSavedMsg(i >= 0 ? `✓ Atnaujinta: ${name}` : `✓ Išsaugota: ${name}`);
+}
+let deleteArmed = false, deleteTimer = null;
+function resetDeleteButton() {
+  deleteArmed = false;
+  clearTimeout(deleteTimer);
+  $('savedDelete').textContent = 'Ištrinti';
+}
+function deleteSaved() {
+  const name = $('savedSelect').value;
+  if (!name) { setSavedMsg('✗ Pirma pasirink misiją sąraše.', true); return; }
+  if (!deleteArmed) {                        // pirmas paspaudimas – paklausti, antras – ištrinti
+    deleteArmed = true;
+    $('savedDelete').textContent = 'Tikrai?';
+    deleteTimer = setTimeout(resetDeleteButton, 3000);
+    return;
+  }
+  saveMissions(loadMissions().filter((x) => x.name !== name));
+  fillSavedSelect('');
+  setSavedMsg(`Ištrinta: ${name}`);
+}
+
 // ===== Misijos ekranas =====
 function openMission(canCancel) {
   pauseFlight();
@@ -339,6 +437,8 @@ function openMission(canCancel) {
   $('startInput').dispatchEvent(new Event('input'));
   $('targetInput').dispatchEvent(new Event('input'));
   $('missionErr').textContent = '';
+  setSavedMsg('');
+  fillSavedSelect(loadMissions().some((m) => m.name === $('missionName').value) ? $('missionName').value : '');
   if (canCancel) show('missionCancel'); else hide('missionCancel');
   show('missionOverlay');
   $('startInput').focus();
@@ -589,12 +689,6 @@ function updateOsd() {
   $('oVolt').textContent = `${(cellV * BATT_CELLS).toFixed(1)}V`;
   $('oMah').textContent = `${Math.round(osdState.mah)}mAh`;
 
-  // Ryšio kokybė: silpsta tolstant nuo starto, šiek tiek mirga
-  const dLat = (d.lat - osdState.startLat) * EARTH_R;
-  const dLon = (d.lon - osdState.startLon) * EARTH_R * Math.cos(d.lat);
-  const distM = Math.hypot(dLat, dLon);
-  const lq = Math.max(0, Math.min(100, Math.round(100 - distM / 100 + (Math.random() - 0.5) * 3)));
-  $('oLq').textContent = `LQ ${lq}`;
   $('oTime').textContent = `${pad(osdState.sec / 60)}:${pad(osdState.sec % 60)}`;
 
   // Apačia: greitis, „gazas“, aukštis
@@ -757,7 +851,7 @@ function setNoise(level) {
   flashStatus(`Triukšmas ${noiseLevel}/${NOISE_MAX}`);
 }
 
-// N: diena → IR su pašvietimu → IR be pašvietimo → diena
+// N: diena ↔ naktinis IR (be pašvietimo)
 function toggleIr() {
   if (!irStage) return;
   irMode = (irMode + 1) % IR_MODES.length;
@@ -834,6 +928,10 @@ $('missionGo').addEventListener('click', startMission);
 $('startInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
 $('targetInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') startMission(); });
 $('missionCancel').addEventListener('click', () => { hide('missionOverlay'); resumeFlight(); });
+$('savedSelect').addEventListener('change', pickSaved);
+$('savedDelete').addEventListener('click', deleteSaved);
+$('missionSave').addEventListener('click', saveCurrentMission);
+$('missionName').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveCurrentMission(); });
 
 $('btnMission').addEventListener('click', () => openMission(true));
 $('btnToken').addEventListener('click', openToken);
