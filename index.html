@@ -10,6 +10,8 @@
 <!-- 2c: žemės aukštis iš Cesium World Terrain (netrukdo vaizdui krautis), krovimo indikatorius, R – atnaujinti vaizdą -->
 <!-- 2d: +/− detalumo reguliatorius (mažiau gabalų = nebelieka neryškių dėmių), didesnė užklausų eilė -->
 <!-- 2e: L – krovimo režimas A/B (B = Cesium skipLevelOfDetail; bandymas apeiti Cesium klaidą #12683), detalumo lygis 8 -->
+<!-- IR: N – naktinis IR (NIR) vaizdas: diena → IR su pašvietimu → IR be pašvietimo → diena -->
+<!-- OSD: tipinis FPV (Betaflight stiliaus) OSD; Z / X – vaizdo triukšmas 0–10 -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -51,13 +53,27 @@
   #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
     background: rgba(0,0,0,0.7); color: #fff; padding: 14px 22px; border-radius: 8px; font-size: 18px; }
 
-  /* FPV OSD: greitis, kamera, aukštis */
-  #osd { position: absolute; left: 0; right: 0; bottom: 100px; z-index: 10; display: flex;
-    justify-content: space-between; align-items: flex-end; padding: 0 28px; pointer-events: none;
-    color: #fff; font: 700 26px/1.2 ui-monospace, Consolas, "Courier New", monospace;
-    text-shadow: 0 0 3px #000, 0 0 6px #000, 1px 1px 2px #000; }
-  #osd .mid { font-size: 18px; opacity: 0.85; }
-  #osd .low { color: #ff5a5a; }
+  /* FPV OSD (Betaflight stiliaus): baltas šriftas su juodu kontūru, analoginio vaizdo 4:3 plote */
+  #osd { position: absolute; top: 0; bottom: 0; left: 50%; transform: translateX(-50%);
+    width: min(100vw, 133.33vh); z-index: 10; pointer-events: none; color: #fff;
+    font: 700 24px/1.25 ui-monospace, Consolas, "Courier New", monospace; letter-spacing: 1px;
+    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000; }
+  #osd .o { position: absolute; white-space: nowrap; }
+  #osd .tl { top: max(7%, 120px); left: 5%; }
+  #osd .tc { top: max(7%, 120px); left: 50%; transform: translateX(-50%); }
+  #osd .tr { top: max(7%, 120px); right: 5%; text-align: right; }
+  #osd .bl { bottom: 112px; left: 5%; }
+  #osd .bc { bottom: 112px; left: 50%; transform: translateX(-50%); }
+  #osd .br { bottom: 112px; right: 5%; text-align: right; }
+  #osd .warn { top: 64%; left: 50%; transform: translateX(-50%); }
+  #osd .blink { animation: osdBlink 0.8s steps(1) infinite; }
+  @keyframes osdBlink { 50% { visibility: hidden; } }
+  #oCross { position: absolute; left: 50%; top: 50%; width: 34px; height: 2px; margin: -1px 0 0 -17px;
+    background: #fff; box-shadow: 0 0 0 1px #000; }
+  #oCross::after { content: ""; position: absolute; left: 16px; top: -6px; width: 2px; height: 14px;
+    background: #fff; box-shadow: 0 0 0 1px #000; }
+  #oHorizon { position: absolute; left: 50%; top: 50%; width: 46%; height: 0; margin-left: -23%;
+    border-top: 2px dashed #fff; filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000); }
 
   /* Pagalbos eilutė (virš Cesium/Google autorių teisių eilutės, kad jos neuždengtų) */
   #helpBar { position: absolute; left: 0; right: 0; margin: 0 auto; width: fit-content; bottom: 34px; z-index: 10;
@@ -80,9 +96,15 @@
 <div id="status" class="hidden"></div>
 
 <div id="osd" class="hidden">
-  <span id="osdSpeed">0 km/h</span>
-  <span id="osdCam" class="mid">Kamera 0°</span>
-  <span id="osdAlt">Aukštis ? m</span>
+  <div class="o tl"><span id="oVolt">0.0V</span><br><span id="oMah">0mAh</span></div>
+  <div class="o tc">ANGL</div>
+  <div class="o tr"><span id="oLq">LQ 100</span><br><span id="oTime">00:00</span></div>
+  <div id="oHorizon"></div>
+  <div id="oCross"></div>
+  <div class="o warn blink" id="oWarn"></div>
+  <div class="o bl" id="oSpeed">0km/h</div>
+  <div class="o bc" id="oThr">THR 0%</div>
+  <div class="o br" id="oAlt">ALT 0m</div>
 </div>
 <div id="helpBar" class="hidden">
   <span class="k"><b>8</b> / <b>2</b> pirmyn / atgal</span><span class="sep">·</span>
@@ -91,6 +113,8 @@
   <span class="k"><b>Q</b> / <b>A</b> kamera žemyn / aukštyn</span><span class="sep">·</span>
   <span class="k"><b>R</b> atnaujinti vaizdą</span><span class="sep">·</span>
   <span class="k"><b>L</b> režimas A/B</span><span class="sep">·</span>
+  <span class="k"><b>N</b> naktis (IR)</span><span class="sep">·</span>
+  <span class="k"><b>Z</b> / <b>X</b> triukšmas</span><span class="sep">·</span>
   <span class="k"><b>+</b> / <b>−</b> detalumas</span>
 </div>
 
@@ -158,7 +182,19 @@ const TILT_MAX   = 20;    // kamera aukštyn iki, °
 const TILT_START = -10;   // kameros kampas starte, °
 const BANK_DEG   = 12;    // pasvirimas posūkyje, ° (0 = be pasvirimo)
 const MIN_AGL    = 2;     // žemiau nenusileidžia, m
-const LOW_AGL    = 10;    // žemiau šito aukštis rodomas raudonai, m
+const LOW_AGL    = 10;    // žemiau šito aukštis OSD mirksi, m
+
+// OSD baterija (apytiksliai, kad skaičiai būtų tikroviški)
+const BATT_CELLS = 6;     // 6S
+const BATT_MAH   = 4000;  // talpa, mAh
+const HOVER_A    = 12;    // srovė kabant, A
+const CRUISE_A   = 35;    // srovė didžiausiu greičiu, A
+const CLIMB_A    = 15;    // papildoma srovė kylant, A
+const LOW_CELL_V = 3.5;   // „LOW BAT“, kai vienam elementui liko mažiau, V
+
+// Vaizdo triukšmas: Z / X, lygiai 0–10 (0 = švarus)
+const NOISE_MAX  = 10;
+const KEY_NOISE  = 'fpvsim_noise';
 const GROUND_MS  = 500;   // kas kiek ms matuoti žemės aukštį po dronu
 
 // Detalumas: lygiai 1..8 (Cesium maximumScreenSpaceError). Mažesnis lygis = mažiau gabalų, greičiau kraunasi.
@@ -166,6 +202,18 @@ const DETAIL_SSE     = [64, 48, 32, 24, 16, 12, 8, 4];
 const DETAIL_DEFAULT = 4;
 const KEY_DETAIL     = 'fpvsim_detail';
 const KEY_MODE       = 'fpvsim_mode';     // krovimo režimas: A = įprastas, B = skipLevelOfDetail
+
+// Naktinis IR (NIR) vaizdas – ne termovizorius: šilti objektai nešviečia (Google vaizdas neturi temperatūrų)
+//   range   – iki kur šviesa (m): su pašvietimu – IR prožektoriaus nuotolis, be jo – tolumos rūkas
+//   ambient – kiek matosi be prožektoriaus (mėnulis, žvaigždės), 0..1
+//   grain   – grūdėtumas, 0..0.3 (be pašvietimo kamera „stiprina“ signalą – daugiau triukšmo)
+//   veg     – kiek pašviesinti medžius ir žolę, 0..1
+//   gain    – bendras šviesumas
+const IR_MODES = [
+  null,                                                                                      // 0 = diena
+  { name: 'IR su pašvietimu',  range: 250,  ambient: 0.05, grain: 0.10, veg: 0.6, gain: 1.0  },
+  { name: 'IR be pašvietimo', range: 2500, ambient: 0.30, grain: 0.25, veg: 0.5, gain: 0.55 },
+];
 const EARTH_R    = 6378137;
 
 // Klavišai: e.code (fizinis klavišas), todėl veikia ir su lietuviška klaviatūra
@@ -253,8 +301,13 @@ let groundBusy = false, groundTok = 0, flightId = 0;
 let tileset = null;         // Google 3D vaizdas
 let terrain = null;         // Cesium World Terrain – tik aukščiui matuoti, nerodomas
 let lastT = 0, lastOsdT = 0;
+const osdState = { mah: 0, sec: 0, amps: 0, startLon: 0, startLat: 0 };   // baterija, laikmatis, startas
+let noiseLevel = Math.min(NOISE_MAX, Math.max(0, parseInt(load(KEY_NOISE), 10) || 0));
+let noiseStage = null;
 let detail = Math.min(DETAIL_SSE.length, Math.max(1, parseInt(load(KEY_DETAIL), 10) || DETAIL_DEFAULT));
 let lodMode = load(KEY_MODE) === 'B' ? 'B' : 'A';
+let irStage = null;         // naktinio IR filtras (įjungiamas N)
+let irMode = 0;             // 0 = diena, 1 = IR su pašvietimu, 2 = IR be pašvietimo
 const pressed = new Set();
 
 // ===== Token'o ekranas =====
@@ -333,6 +386,8 @@ async function initViewer() {
   });
   viewer.scene.screenSpaceCameraController.enableInputs = false;   // pelė kamera nevaldo – tik klaviatūra
   viewer.camera.frustum.fov = Cesium.Math.toRadians(FOV_DEG);      // platesnis, FPV kameros vaizdas
+  irStage = createIrStage();                                       // naktinis IR, iš pradžių išjungtas
+  noiseStage = createNoiseStage();                                 // vaizdo triukšmas (Z / X)
 
   setStatus('Jungiamasi prie Cesium ion...');
   try {
@@ -414,6 +469,7 @@ async function flyToStart(start) {
   });
   groundH = ground;
   flightId++; groundBusy = false;           // pamiršti senas užklausas
+  Object.assign(osdState, { mah: 0, sec: 0, amps: 0, startLon: drone.lon, startLat: drone.lat });
   droneReady = true;
   resumeFlight();
 }
@@ -479,6 +535,13 @@ function flightTick() {
 
   // Pasvirimas posūkyje – tik kai skrenda (vietoje sukantis nesvyra)
   const roll = rad(BANK_DEG) * (d.turn / turnMax) * Math.min(1, Math.abs(d.speed) / maxV);
+  d.roll = roll;
+
+  // OSD: laikmatis ir baterija
+  osdState.sec += dt;
+  osdState.amps = HOVER_A + (CRUISE_A - HOVER_A) * Math.min(1, Math.abs(d.speed) / maxV)
+                + Math.max(0, d.climb / CLIMB_MS) * CLIMB_A;
+  osdState.mah += osdState.amps * dt / 3.6;
 
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromRadians(d.lon, d.lat, d.h),
@@ -516,13 +579,46 @@ function sampleGround() {
 setInterval(sampleGround, GROUND_MS);
 
 function updateOsd() {
-  $('osdSpeed').textContent = `${Math.round(drone.speed * 3.6)} km/h`;
-  $('osdCam').textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(drone.pitch))}°`;
-  const alt = $('osdAlt');
-  if (groundH === null) { alt.textContent = 'Aukštis ? m'; alt.classList.remove('low'); updateTilesInfo(); return; }
-  const agl = Math.round(drone.h - groundH);
-  alt.textContent = `Aukštis ${agl} m`;
-  alt.classList.toggle('low', agl < LOW_AGL);
+  const d = drone;
+  const maxV = MAX_KMH / 3.6;
+  const pad = (n) => String(Math.floor(n)).padStart(2, '0');
+
+  // Baterija: įtampa krenta naudojant, o apkrovus – „susmunka“
+  const used = Math.min(1, osdState.mah / BATT_MAH);
+  const cellV = Math.max(3.0, 4.2 - 0.95 * used - osdState.amps * 0.004);
+  $('oVolt').textContent = `${(cellV * BATT_CELLS).toFixed(1)}V`;
+  $('oMah').textContent = `${Math.round(osdState.mah)}mAh`;
+
+  // Ryšio kokybė: silpsta tolstant nuo starto, šiek tiek mirga
+  const dLat = (d.lat - osdState.startLat) * EARTH_R;
+  const dLon = (d.lon - osdState.startLon) * EARTH_R * Math.cos(d.lat);
+  const distM = Math.hypot(dLat, dLon);
+  const lq = Math.max(0, Math.min(100, Math.round(100 - distM / 100 + (Math.random() - 0.5) * 3)));
+  $('oLq').textContent = `LQ ${lq}`;
+  $('oTime').textContent = `${pad(osdState.sec / 60)}:${pad(osdState.sec % 60)}`;
+
+  // Apačia: greitis, „gazas“, aukštis
+  $('oSpeed').textContent = `${Math.round(Math.abs(d.speed) * 3.6)}km/h`;
+  const thr = 38 + 30 * Math.min(1, Math.abs(d.speed) / maxV) + 25 * (d.climb / CLIMB_MS);
+  $('oThr').textContent = `THR ${Math.round(Math.max(0, Math.min(100, thr)))}%`;
+  const alt = $('oAlt');
+  const agl = groundH === null ? null : Math.round(d.h - groundH);
+  alt.textContent = agl === null ? 'ALT ?' : `ALT ${agl}m`;
+  alt.classList.toggle('blink', agl !== null && agl < LOW_AGL);
+
+  // Įspėjimai
+  $('oWarn').textContent = cellV < LOW_CELL_V ? 'LOW BAT' : '';
+
+  // Dirbtinis horizontas: pasvyra posūkyje, juda kartu su kameros kampu
+  const hz = $('oHorizon');
+  const fovy = viewer && viewer.camera.frustum.fovy ? viewer.camera.frustum.fovy : rad(60);
+  const yPx = -(window.innerHeight / 2) * Math.tan(-d.pitch) / Math.tan(fovy / 2);
+  hz.style.display = Math.abs(yPx) < window.innerHeight * 0.4 ? '' : 'none';
+  hz.style.transform = `translateY(${yPx.toFixed(1)}px) rotate(${(-Cesium.Math.toDegrees(d.roll || 0)).toFixed(1)}deg)`;
+
+  // Informacija kairėje viršuje (ne OSD dalis)
+  const cam = $('hudCam');
+  if (cam) cam.textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(d.pitch))}° · Triukšmas ${noiseLevel}/${NOISE_MAX}`;
   updateTilesInfo();
 }
 
@@ -534,7 +630,7 @@ function updateTilesInfo() {
   const n = st.numberOfPendingRequests + st.numberOfTilesProcessing;
   const mb = Math.round(tileset.totalMemoryUsageInBytes / 1e6);
   const full = tileset.memoryAdjustedScreenSpaceError > tileset.maximumScreenSpaceError + 0.01;
-  el.textContent = `Režimas ${lodMode} · Detalumas ${detail}/${DETAIL_SSE.length} · `
+  el.textContent = (irMode > 0 ? IR_MODES[irMode].name + ' · ' : '') + `Režimas ${lodMode} · Detalumas ${detail}/${DETAIL_SSE.length} · `
                  + (n > 0 ? `kraunasi: ${n}` : 'užkrauta') + ` · ${mb} MB`
                  + (full ? ' · ATMINTIS PILNA' : '') + (terrain ? '' : ' · be reljefo');
   el.classList.toggle('warn', full);
@@ -547,6 +643,127 @@ function setDetail(level) {
   if (tileset) tileset.maximumScreenSpaceError = DETAIL_SSE[detail - 1];
   updateTilesInfo();
   flashStatus(`Detalumas ${detail}/${DETAIL_SSE.length}`);
+}
+
+// ===== Naktinis IR (NIR) vaizdas =====
+function createIrStage() {
+  const stage = new Cesium.PostProcessStage({
+    name: 'fpv_ir',
+    fragmentShader: `
+      uniform sampler2D colorTexture;
+      uniform sampler2D depthTexture;
+      uniform float range;
+      uniform float ambient;
+      uniform float grain;
+      uniform float veg;
+      uniform float gain;
+      in vec2 v_textureCoordinates;
+
+      float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+
+      void main(void) {
+        vec2 uv = v_textureCoordinates;
+        vec2 px = 1.0 / czm_viewport.zw;
+        // Lengvas suliejimas – naktinė kamera neryški
+        vec3 c = texture(colorTexture, uv).rgb * 0.4
+               + (texture(colorTexture, uv + vec2(px.x, 0.0)).rgb
+                + texture(colorTexture, uv - vec2(px.x, 0.0)).rgb
+                + texture(colorTexture, uv + vec2(0.0, px.y)).rgb
+                + texture(colorTexture, uv - vec2(0.0, px.y)).rgb) * 0.15;
+        float lum = dot(c, vec3(0.30, 0.59, 0.11));
+
+        // Augmenija IR šviesoje atrodo šviesi
+        float v = smoothstep(0.0, 0.08, c.g - max(c.r, c.b));
+        lum = mix(lum, min(1.0, lum * 1.6 + 0.25), v * veg);
+
+        // IR prožektorius ant drono: kuo toliau, tuo tamsiau. Dangus – juodas.
+        float depth = texture(depthTexture, uv).r;
+        float light = 0.0;
+        if (depth < 1.0) {
+          vec4 ec = czm_windowToEyeCoordinates(gl_FragCoord.xy, depth);
+          float d = length(ec.xyz / ec.w) / range;     // atstumas iki taško, m
+          light = exp(-d * d);
+        }
+        lum *= gain * (ambient + (1.0 - ambient) * light);
+
+        // Tamsesni kraštai
+        vec2 q = uv - 0.5;
+        lum *= clamp(1.0 - dot(q, q) * 1.4, 0.0, 1.0);
+
+        // Grūdėtumas (kinta kas kadrą)
+        float f = mod(czm_frameNumber, 97.0);
+        lum += (rand(uv * czm_viewport.zw + vec2(f * 0.37, f * 0.71)) - 0.5) * grain;
+
+        out_FragColor = vec4(vec3(clamp(lum, 0.0, 1.0)), 1.0);
+      }`,
+    uniforms: {
+      range:   () => (IR_MODES[irMode] || IR_MODES[1]).range,
+      ambient: () => (IR_MODES[irMode] || IR_MODES[1]).ambient,
+      grain:   () => (IR_MODES[irMode] || IR_MODES[1]).grain,
+      veg:     () => (IR_MODES[irMode] || IR_MODES[1]).veg,
+      gain:    () => (IR_MODES[irMode] || IR_MODES[1]).gain,
+    },
+  });
+  stage.enabled = false;
+  viewer.scene.postProcessStages.add(stage);
+  return stage;
+}
+
+// ===== Vaizdo triukšmas (Z / X) =====
+function createNoiseStage() {
+  const stage = new Cesium.PostProcessStage({
+    name: 'fpv_noise',
+    fragmentShader: `
+      uniform sampler2D colorTexture;
+      uniform float level;          // 0..1
+      in vec2 v_textureCoordinates;
+
+      float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+
+      void main(void) {
+        vec2 uv = v_textureCoordinates;
+        float f = mod(czm_frameNumber, 97.0);
+
+        // Stipresniame triukšme eilutės truputį „šokinėja“ į šonus
+        float line = floor(uv.y * czm_viewport.w / 2.0);
+        float jit = (rand(vec2(line, f)) - 0.5) * 0.006 * smoothstep(0.5, 1.0, level);
+        vec3 c = texture(colorTexture, uv + vec2(jit, 0.0)).rgb;
+
+        // Grūdėtumas
+        c += (rand(uv * czm_viewport.zw + vec2(f * 0.37, f * 0.71)) - 0.5) * 0.35 * level;
+
+        // „Sniegas“ – atsitiktiniai balti taškai
+        float snow = rand(uv * czm_viewport.zw * 0.5 + vec2(f * 1.31, f * 2.17));
+        c = mix(c, vec3(1.0), step(1.0 - 0.02 * level * level, snow));
+
+        // Silpstant signalui blunka spalvos
+        float g = dot(c, vec3(0.299, 0.587, 0.114));
+        c = mix(c, vec3(g), 0.5 * level);
+
+        out_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+      }`,
+    uniforms: { level: () => noiseLevel / NOISE_MAX },
+  });
+  stage.enabled = noiseLevel > 0;
+  viewer.scene.postProcessStages.add(stage);
+  return stage;
+}
+
+function setNoise(level) {
+  noiseLevel = Math.min(NOISE_MAX, Math.max(0, level));
+  save(KEY_NOISE, String(noiseLevel));
+  if (noiseStage) noiseStage.enabled = noiseLevel > 0;
+  updateOsd();
+  flashStatus(`Triukšmas ${noiseLevel}/${NOISE_MAX}`);
+}
+
+// N: diena → IR su pašvietimu → IR be pašvietimo → diena
+function toggleIr() {
+  if (!irStage) return;
+  irMode = (irMode + 1) % IR_MODES.length;
+  irStage.enabled = irMode > 0;
+  updateTilesInfo();
+  flashStatus(irMode > 0 ? IR_MODES[irMode].name : 'Diena');
 }
 
 // L: perjungti krovimo režimą A/B. Pasirinkimas išsaugomas naršyklėje.
@@ -578,6 +795,7 @@ function updateHud(start, target) {
   $('hud').innerHTML =
     `Startas: ${start.mgrs}<br>` +
     `Taikinys: ${target ? target.mgrs : '—'}<br>` +
+    `<span id="hudCam"></span><br>` +
     `<span id="hudTiles"></span>`;
   show('hud');
 }
@@ -587,6 +805,9 @@ window.addEventListener('keydown', (e) => {
   if (flying && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.code === 'KeyR') { e.preventDefault(); refreshTiles(); return; }
     if (e.code === 'KeyL') { e.preventDefault(); toggleMode(); return; }
+    if (e.code === 'KeyN') { e.preventDefault(); toggleIr(); return; }
+    if (e.code === 'KeyZ') { e.preventDefault(); setNoise(noiseLevel - 1); return; }
+    if (e.code === 'KeyX') { e.preventDefault(); setNoise(noiseLevel + 1); return; }
     if (e.code === 'NumpadAdd' || e.code === 'Equal')       { e.preventDefault(); setDetail(detail + 1); return; }
     if (e.code === 'NumpadSubtract' || e.code === 'Minus')  { e.preventDefault(); setDetail(detail - 1); return; }
   }
