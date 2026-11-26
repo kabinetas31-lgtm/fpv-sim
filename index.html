@@ -13,6 +13,7 @@
 <!-- IR: N – naktinis IR (NIR) vaizdas be pašvietimo: diena ↔ naktis -->
 <!-- OSD: tipinis FPV (Betaflight stiliaus) OSD be LQ ir ANGL; Z / X – vaizdo triukšmas 0–10 -->
 <!-- Misijos: startą ir taikinį galima išsaugoti su pavadinimu ir vėliau pasirinkti iš sąrašo -->
+<!-- Objektyvas: F – įprastas → FPV plataus kampo („žuvies akis“) → FPV 4:3 su juodais šonais -->
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/mgrs@2.2.0/dist/mgrs.min.js"></script>
@@ -20,6 +21,7 @@
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
     background: #000; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   #cesiumContainer { position: absolute; inset: 0; }
+  #cesiumContainer.lens43 { left: calc((100vw - min(100vw, 133.33vh)) / 2); right: calc((100vw - min(100vw, 133.33vh)) / 2); }
   .hidden { display: none !important; }
 
   .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.6); z-index: 20;
@@ -121,6 +123,7 @@
   <span class="k"><b>L</b> režimas A/B</span><span class="sep">·</span>
   <span class="k"><b>N</b> naktis (IR)</span><span class="sep">·</span>
   <span class="k"><b>Z</b> / <b>X</b> triukšmas</span><span class="sep">·</span>
+  <span class="k"><b>F</b> objektyvas</span><span class="sep">·</span>
   <span class="k"><b>+</b> / <b>−</b> detalumas</span>
 </div>
 
@@ -185,6 +188,12 @@ const KEY_TARGET = 'fpvsim_target';
 
 // Skrydis (2 žingsnis). Šiuos skaičius galima keisti pagal pojūtį.
 const FOV_DEG    = 90;    // kameros matymo kampas horizontaliai, ° (platesnis = daugiau krauti)
+
+// FPV objektyvas (F): platus kampas ir „žuvies akies“ iškraipymas
+const FPV_FOV_DEG   = 120;  // FPV kameros kampas horizontaliai, °
+const LENS_STRENGTH = 0.7;  // iškraipymo stiprumas, 0 = be iškraipymo, 1 = pilna „žuvies akis“
+const LENS_NAMES    = ['', 'FPV objektyvas', 'FPV objektyvas 4:3'];
+const KEY_LENS      = 'fpvsim_lens';
 const MAX_KMH    = 80;    // didžiausias greitis pirmyn, km/h
 const BACK_KMH   = 15;    // didžiausias greitis atgal, km/h
 const ACCEL      = 7;     // įsibėgėjimas, m/s²
@@ -321,6 +330,8 @@ let lastT = 0, lastOsdT = 0;
 const osdState = { mah: 0, sec: 0, amps: 0, startLon: 0, startLat: 0 };   // baterija, laikmatis, startas
 let noiseLevel = Math.min(NOISE_MAX, Math.max(0, parseInt(load(KEY_NOISE), 10) || 0));
 let noiseStage = null;
+let lensStage = null;
+let lensMode = Math.min(2, Math.max(0, parseInt(load(KEY_LENS), 10) || 0));   // 0 įprastas, 1 FPV, 2 FPV 4:3
 let detail = Math.min(DETAIL_SSE.length, Math.max(1, parseInt(load(KEY_DETAIL), 10) || DETAIL_DEFAULT));
 let lodMode = load(KEY_MODE) === 'B' ? 'B' : 'A';
 let irStage = null;         // naktinio IR filtras (įjungiamas N)
@@ -485,9 +496,10 @@ async function initViewer() {
     selectionIndicator: false,
   });
   viewer.scene.screenSpaceCameraController.enableInputs = false;   // pelė kamera nevaldo – tik klaviatūra
-  viewer.camera.frustum.fov = Cesium.Math.toRadians(FOV_DEG);      // platesnis, FPV kameros vaizdas
   irStage = createIrStage();                                       // naktinis IR, iš pradžių išjungtas
+  lensStage = createLensStage();                                   // FPV objektyvas (F)
   noiseStage = createNoiseStage();                                 // vaizdo triukšmas (Z / X)
+  applyLens();
 
   setStatus('Jungiamasi prie Cesium ion...');
   try {
@@ -705,14 +717,15 @@ function updateOsd() {
 
   // Dirbtinis horizontas: pasvyra posūkyje, juda kartu su kameros kampu
   const hz = $('oHorizon');
-  const fovy = viewer && viewer.camera.frustum.fovy ? viewer.camera.frustum.fovy : rad(60);
-  const yPx = -(window.innerHeight / 2) * Math.tan(-d.pitch) / Math.tan(fovy / 2);
-  hz.style.display = Math.abs(yPx) < window.innerHeight * 0.4 ? '' : 'none';
+  const canvasH = viewer ? viewer.canvas.clientHeight : window.innerHeight;
+  const yPx = -(canvasH / 2) * screenYForTan(Math.tan(-d.pitch));
+  hz.style.display = Math.abs(yPx) < canvasH * 0.4 ? '' : 'none';
   hz.style.transform = `translateY(${yPx.toFixed(1)}px) rotate(${(-Cesium.Math.toDegrees(d.roll || 0)).toFixed(1)}deg)`;
 
   // Informacija kairėje viršuje (ne OSD dalis)
   const cam = $('hudCam');
-  if (cam) cam.textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(d.pitch))}° · Triukšmas ${noiseLevel}/${NOISE_MAX}`;
+  if (cam) cam.textContent = `Kamera ${Math.round(Cesium.Math.toDegrees(d.pitch))}° · Triukšmas ${noiseLevel}/${NOISE_MAX}`
+                           + (lensMode > 0 ? ` · ${LENS_NAMES[lensMode]}` : '');
   updateTilesInfo();
 }
 
@@ -801,6 +814,81 @@ function createIrStage() {
   stage.enabled = false;
   viewer.scene.postProcessStages.add(stage);
   return stage;
+}
+
+// ===== FPV objektyvas (F) =====
+// Vaizdas piešiamas plačiu kampu, o filtras „suspaudžia“ kraštus kaip plataus kampo FPV objektyvas
+function lensTan() {
+  const f = viewer.camera.frustum;
+  const tx = Math.tan(f.fov / 2);
+  return { tx, ty: tx / f.aspectRatio };
+}
+
+function createLensStage() {
+  const stage = new Cesium.PostProcessStage({
+    name: 'fpv_lens',
+    fragmentShader: `
+      uniform sampler2D colorTexture;
+      uniform float strength;
+      uniform float tanX;
+      uniform float tanY;
+      in vec2 v_textureCoordinates;
+
+      void main(void) {
+        vec2 tanXY = vec2(tanX, tanY);
+        vec2 t = (v_textureCoordinates * 2.0 - 1.0) * tanXY;   // taškas „plokščiame“ vaizde
+        float rt = length(t);
+        float diag = length(tanXY);
+        float rf = tan(rt / diag * atan(diag));                  // „žuvies akis“: kampas proporcingas atstumui
+        float rs = mix(rt, rf, strength);
+        vec2 src = rt > 1e-6 ? t * (rs / rt) : t;
+        out_FragColor = texture(colorTexture, src / tanXY * 0.5 + 0.5);
+      }`,
+    uniforms: {
+      strength: () => LENS_STRENGTH,
+      tanX: () => lensTan().tx,
+      tanY: () => lensTan().ty,
+    },
+  });
+  stage.enabled = false;
+  viewer.scene.postProcessStages.add(stage);
+  return stage;
+}
+
+// Pritaiko pasirinktą objektyvą: kampą, iškraipymą ir 4:3 plotą
+function applyLens() {
+  if (!viewer) return;
+  viewer.camera.frustum.fov = Cesium.Math.toRadians(lensMode > 0 ? FPV_FOV_DEG : FOV_DEG);
+  if (lensStage) lensStage.enabled = lensMode > 0;
+  $('cesiumContainer').classList.toggle('lens43', lensMode === 2);
+}
+
+function toggleLens() {
+  lensMode = (lensMode + 1) % LENS_NAMES.length;
+  save(KEY_LENS, String(lensMode));
+  applyLens();
+  updateOsd();
+  flashStatus(lensMode > 0 ? LENS_NAMES[lensMode] : 'Įprastas vaizdas');
+}
+
+// Kur ekrane (−1..1 nuo centro aukštyn) atsiduria kryptis, kurios kampo tangentas tanV.
+// Reikia dirbtiniam horizontui, kai įjungtas objektyvo iškraipymas.
+function screenYForTan(tanV) {
+  if (!viewer) return 0;
+  const { tx, ty } = lensTan();
+  if (lensMode === 0) return tanV / ty;
+  const diag = Math.hypot(tx, ty), thetaD = Math.atan(diag);
+  const srcTan = (yo) => {                     // tas pats skaičiavimas kaip filtre, kai x = 0
+    const rt = Math.abs(yo) * ty;
+    const rs = (1 - LENS_STRENGTH) * rt + LENS_STRENGTH * Math.tan(rt / diag * thetaD);
+    return Math.sign(yo) * rs;
+  };
+  let lo = -1.5, hi = 1.5;
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if (srcTan(mid) < tanV) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 // ===== Vaizdo triukšmas (Z / X) =====
@@ -900,6 +988,7 @@ window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyR') { e.preventDefault(); refreshTiles(); return; }
     if (e.code === 'KeyL') { e.preventDefault(); toggleMode(); return; }
     if (e.code === 'KeyN') { e.preventDefault(); toggleIr(); return; }
+    if (e.code === 'KeyF') { e.preventDefault(); toggleLens(); return; }
     if (e.code === 'KeyZ') { e.preventDefault(); setNoise(noiseLevel - 1); return; }
     if (e.code === 'KeyX') { e.preventDefault(); setNoise(noiseLevel + 1); return; }
     if (e.code === 'NumpadAdd' || e.code === 'Equal')       { e.preventDefault(); setDetail(detail + 1); return; }
